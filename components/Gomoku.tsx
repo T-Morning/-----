@@ -1,17 +1,41 @@
-import React, { useState, useCallback } from 'react';
-import { Coordinates } from '../types';
-import { Undo2, RefreshCw } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { PeerConnection, OnlineMove, OnlineAction } from '../types';
+import { Undo2, RefreshCw, Users } from 'lucide-react';
 
 const BOARD_SIZE = 15;
 
-const Gomoku: React.FC = () => {
+interface GomokuProps {
+    connection?: PeerConnection;
+    isHost?: boolean;
+}
+
+const Gomoku: React.FC<GomokuProps> = ({ connection, isHost }) => {
   const [history, setHistory] = useState<number[][][]>([
     Array(BOARD_SIZE).fill(null).map(() => Array(BOARD_SIZE).fill(0))
   ]);
   const [currentPlayer, setCurrentPlayer] = useState<number>(1); // 1: Black, 2: White
   const [winner, setWinner] = useState<number | null>(null);
 
+  // Online Logic: Host is always Black (1), Guest is White (2)
+  const isOnline = !!connection;
+  const myPlayerNumber = isHost ? 1 : 2;
+  const isMyTurn = !isOnline || currentPlayer === myPlayerNumber;
+
   const currentBoard = history[history.length - 1];
+
+  useEffect(() => {
+    if (!connection) return;
+
+    connection.on('data', (data: any) => {
+        if (data.type === 'MOVE') {
+            handleMove(data.x, data.y, false); // false = don't send back
+        } else if (data.type === 'UNDO') {
+            performUndo();
+        } else if (data.type === 'RESET') {
+            performReset();
+        }
+    });
+  }, [connection, history, currentPlayer, winner]); // Dependencies simplified for effect re-binding
 
   const checkWin = (board: number[][], x: number, y: number, player: number) => {
     const directions = [
@@ -20,7 +44,6 @@ const Gomoku: React.FC = () => {
 
     for (const [dx, dy] of directions) {
       let count = 1;
-      // Check forward
       let i = 1;
       while (true) {
         const nx = x + dx * i;
@@ -29,7 +52,6 @@ const Gomoku: React.FC = () => {
         count++;
         i++;
       }
-      // Check backward
       i = 1;
       while (true) {
         const nx = x - dx * i;
@@ -43,52 +65,91 @@ const Gomoku: React.FC = () => {
     return false;
   };
 
-  const handleClick = (x: number, y: number) => {
-    if (winner || currentBoard[y][x] !== 0) return;
+  const handleMove = (x: number, y: number, isLocal: boolean) => {
+    // Need to use functional update or refs for latest state if called from event listener,
+    // but here we rely on React re-rendering for simplicity, assuming data handler is fresh.
+    // However, inside useEffect, we might have stale state. 
+    // For safety in this structure, we'll access state directly from the component scope 
+    // knowing that `connection.on` is re-bound when history changes (see dependency array).
+    
+    // Check validity
+    // NOTE: We must check based on current state variables which might be captured in closure
+    // Ideally we'd use a reducer, but let's stick to this simple pattern.
+    // The check `currentBoard[y][x] !== 0` needs to happen on the *latest* board.
+    // Since we re-bind the event listener on history change, `currentBoard` is fresh.
+    
+    if (winner) return;
+    // Note: The history state inside this closure is fresh because of useEffect dependency
+    const board = history[history.length - 1]; 
+    if (board[y][x] !== 0) return;
 
-    const newBoard = currentBoard.map(row => [...row]);
+    const newBoard = board.map(row => [...row]);
     newBoard[y][x] = currentPlayer;
 
-    setHistory([...history, newBoard]);
+    setHistory(prev => [...prev, newBoard]);
 
     if (checkWin(newBoard, x, y, currentPlayer)) {
       setWinner(currentPlayer);
     } else {
-      setCurrentPlayer(currentPlayer === 1 ? 2 : 1);
+      setCurrentPlayer(prev => prev === 1 ? 2 : 1);
     }
+
+    if (isLocal && connection) {
+        connection.send({ type: 'MOVE', x, y } as OnlineMove);
+    }
+  };
+
+  const handleClick = (x: number, y: number) => {
+    if (!isMyTurn && !winner) return; // Prevent moving out of turn
+    if (winner || currentBoard[y][x] !== 0) return;
+    
+    handleMove(x, y, true);
+  };
+
+  const performUndo = () => {
+      setHistory(prev => {
+          if (prev.length <= 1) return prev;
+          return prev.slice(0, -1);
+      });
+      setWinner(null);
+      setCurrentPlayer(prev => prev === 1 ? 2 : 1);
   };
 
   const handleUndo = () => {
-    if (history.length > 1 && !winner) {
-      setHistory(history.slice(0, -1));
-      setCurrentPlayer(currentPlayer === 1 ? 2 : 1);
-    } else if (winner && history.length > 1) {
-      // Allow undo after win to continue analysis or revert mistake
-      setHistory(history.slice(0, -1));
-      setWinner(null);
-      setCurrentPlayer(currentPlayer === 1 ? 2 : 1); // Revert to winner's turn
+    if (history.length > 1) {
+      performUndo();
+      if (connection) connection.send({ type: 'UNDO' } as OnlineAction);
     }
   };
 
-  const resetGame = () => {
+  const performReset = () => {
     setHistory([Array(BOARD_SIZE).fill(null).map(() => Array(BOARD_SIZE).fill(0))]);
     setCurrentPlayer(1);
     setWinner(null);
   };
 
+  const resetGame = () => {
+    performReset();
+    if (connection) connection.send({ type: 'RESET' } as OnlineAction);
+  };
+
   return (
     <div className="flex flex-col items-center justify-center min-h-[600px] w-full max-w-4xl mx-auto p-4">
-      <div className="mb-6 flex justify-between items-center w-full max-w-md">
+      <div className="mb-6 flex flex-col md:flex-row justify-between items-center w-full max-w-md gap-4">
         <div className="flex items-center gap-4">
-            <div className={`px-4 py-2 rounded-lg font-bold shadow-sm transition-all ${currentPlayer === 1 ? 'bg-slate-900 text-white scale-105' : 'bg-gray-200 text-gray-400'}`}>
-                黑子 (Black)
+            <div className={`px-4 py-2 rounded-lg font-bold shadow-sm transition-all flex flex-col items-center ${currentPlayer === 1 ? 'bg-slate-900 text-white scale-105' : 'bg-gray-200 text-gray-400'}`}>
+                <span>黑子 (Black)</span>
+                {isOnline && isHost && <span className="text-[10px] uppercase tracking-wider bg-white/20 px-1 rounded">You</span>}
+                {isOnline && !isHost && <span className="text-[10px] uppercase tracking-wider">Opponent</span>}
             </div>
-            <div className={`px-4 py-2 rounded-lg font-bold shadow-sm transition-all ${currentPlayer === 2 ? 'bg-white text-slate-900 border border-slate-300 scale-105' : 'bg-gray-200 text-gray-400'}`}>
-                白子 (White)
+            <div className={`px-4 py-2 rounded-lg font-bold shadow-sm transition-all flex flex-col items-center ${currentPlayer === 2 ? 'bg-white text-slate-900 border border-slate-300 scale-105' : 'bg-gray-200 text-gray-400'}`}>
+                <span>白子 (White)</span>
+                {isOnline && !isHost && <span className="text-[10px] uppercase tracking-wider bg-slate-900/10 px-1 rounded">You</span>}
+                {isOnline && isHost && <span className="text-[10px] uppercase tracking-wider">Opponent</span>}
             </div>
         </div>
         <div className="flex gap-2">
-            <button onClick={handleUndo} disabled={history.length <= 1} className="p-2 rounded-full bg-wood-300 hover:bg-wood-400 disabled:opacity-50 transition-colors" title="悔棋 (Undo)">
+            <button onClick={handleUndo} disabled={history.length <= 1 || (!isMyTurn && isOnline)} className="p-2 rounded-full bg-wood-300 hover:bg-wood-400 disabled:opacity-50 transition-colors" title="悔棋 (Undo)">
                 <Undo2 size={20} className="text-wood-900" />
             </button>
             <button onClick={resetGame} className="p-2 rounded-full bg-wood-300 hover:bg-wood-400 transition-colors" title="重新开始 (Restart)">
@@ -96,6 +157,12 @@ const Gomoku: React.FC = () => {
             </button>
         </div>
       </div>
+
+      {isOnline && !winner && (
+          <div className="mb-2 text-wood-700 font-medium flex items-center gap-2 animate-pulse">
+              {isMyTurn ? "Your Turn" : "Waiting for opponent..."}
+          </div>
+      )}
 
       {winner && (
         <div className="absolute z-10 top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-white/90 backdrop-blur-sm border-2 border-wood-600 p-8 rounded-xl shadow-2xl text-center animate-in fade-in zoom-in duration-300">
@@ -148,7 +215,7 @@ const Gomoku: React.FC = () => {
                 )}
                 
                 {/* Hover Effect */}
-                {currentBoard[y][x] === 0 && !winner && (
+                {currentBoard[y][x] === 0 && !winner && isMyTurn && (
                    <div className="absolute top-1/2 left-1/2 w-[40%] h-[40%] rounded-full transform -translate-x-1/2 -translate-y-1/2 bg-slate-900/0 hover:bg-slate-900/20 transition-colors"></div>
                 )}
               </div>

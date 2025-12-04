@@ -34,3 +34,24 @@ export interface XiangqiPiece {
 }
 
 export type XiangqiBoardState = (XiangqiPiece | null)[][];
+
+// Online Types
+export interface PeerConnection {
+    send: (data: any) => void;
+    on: (event: string, callback: (data: any) => void) => void;
+    close: () => void;
+    open: boolean;
+}
+
+export interface OnlineMove {
+    type: 'MOVE';
+    x: number;
+    y: number;
+    player?: any;
+}
+
+export interface OnlineAction {
+    type: 'UNDO' | 'RESET';
+}
+
+export type GameMessage = OnlineMove | OnlineAction;

@@ -1,11 +1,9 @@
-import React, { useState } from 'react';
-import { Player, PieceType, XiangqiPiece, XiangqiBoardState } from '../types';
+import React, { useState, useEffect } from 'react';
+import { Player, PieceType, XiangqiPiece, XiangqiBoardState, PeerConnection, OnlineMove, OnlineAction } from '../types';
 import { Undo2, RefreshCw } from 'lucide-react';
 
 // Initial Setup
 const INITIAL_BOARD: XiangqiBoardState = [
-  // Red Side (Top in this representation, but usually bottom. Let's make Red bottom for standard view)
-  // Actually, standard array index 0 is top. Let's put Black at 0 (top) and Red at 9 (bottom).
   [
     { type: PieceType.CHARIOT, player: Player.BLACK },
     { type: PieceType.HORSE, player: Player.BLACK },
@@ -59,13 +57,49 @@ const getPieceLabel = (type: PieceType, player: Player): string => {
   }
 };
 
-const Xiangqi: React.FC = () => {
+interface XiangqiProps {
+    connection?: PeerConnection;
+    isHost?: boolean;
+}
+
+const Xiangqi: React.FC<XiangqiProps> = ({ connection, isHost }) => {
   const [history, setHistory] = useState<XiangqiBoardState[]>([INITIAL_BOARD]);
   const [selected, setSelected] = useState<{x: number, y: number} | null>(null);
   const [turn, setTurn] = useState<Player.RED | Player.BLACK>(Player.RED);
   const [winner, setWinner] = useState<Player | null>(null);
 
   const currentBoard = history[history.length - 1];
+
+  // Online: Host is Red, Guest is Black
+  const isOnline = !!connection;
+  const myPlayerColor = isHost ? Player.RED : Player.BLACK;
+  const isMyTurn = !isOnline || turn === myPlayerColor;
+
+  // Since we need to sync two clicks (Select -> Move), we only send the final MOVE command.
+  // But wait, the opponent needs to see the move locally.
+  // The logic handles one atomic move: Start(x,y) -> End(x,y).
+  // In `handleClick`, we only commit a move when `selected` is valid.
+  // So we send { fromX, fromY, toX, toY }? 
+  // The current protocol only sends {x, y}. We need to know where it came from.
+  // Actually, Xiangqi move needs TWO coordinates.
+  // Let's update the Move protocol slightly for Xiangqi or use two messages?
+  // Better: Update the generic Move type to support 'from' props, but since `OnlineMove` is generic,
+  // let's just make the message flexible. For simplicity, we will send { type: 'MOVE_XIANGQI', fromX, fromY, toX, toY }.
+  // But to keep `types.ts` cleaner I'll just pack it into x,y and "extra" data if needed, or update `OnlineMove` locally.
+  
+  useEffect(() => {
+    if (!connection) return;
+
+    connection.on('data', (data: any) => {
+        if (data.type === 'MOVE_XIANGQI') {
+            performMove(data.fromX, data.fromY, data.toX, data.toY, false);
+        } else if (data.type === 'UNDO') {
+            performUndo();
+        } else if (data.type === 'RESET') {
+            performReset();
+        }
+    });
+  }, [connection, history, turn, winner]);
 
   const isValidMove = (board: XiangqiBoardState, x1: number, y1: number, x2: number, y2: number, player: Player): boolean => {
     // Basic bounds check
@@ -165,12 +199,45 @@ const Xiangqi: React.FC = () => {
     return true;
   };
 
+  const performMove = (fromX: number, fromY: number, toX: number, toY: number, isLocal: boolean) => {
+      // NOTE: We assume moves coming from online are valid or at least synced.
+      // We re-use current state from closure, relying on useEffect refresh.
+      const board = history[history.length - 1];
+      const newBoard = board.map(row => row.map(p => p ? {...p} : null));
+        
+      // Check win condition (capture King)
+      const targetPiece = newBoard[toY][toX];
+      // Current player is determined by the piece being moved, not just `turn` state, to be safe.
+      const movingPiece = newBoard[fromY][fromX];
+      if (!movingPiece) return;
+
+      if (targetPiece && targetPiece.type === PieceType.GENERAL) {
+          setWinner(movingPiece.player);
+      }
+
+      newBoard[toY][toX] = newBoard[fromY][fromX];
+      newBoard[fromY][fromX] = null;
+
+      setHistory(prev => [...prev, newBoard]);
+      setTurn(prev => prev === Player.RED ? Player.BLACK : Player.RED);
+      setSelected(null);
+
+      if (isLocal && connection) {
+          connection.send({ type: 'MOVE_XIANGQI', fromX, fromY, toX, toY });
+      }
+  };
+
   const handleClick = (x: number, y: number) => {
     if (winner) return;
+
+    // Restriction: Cannot interact if not my turn in online mode
+    if (isOnline && !isMyTurn) return;
+
     const piece = currentBoard[y][x];
 
     // Select piece
     if (piece && piece.player === turn) {
+      // Allow re-selection of own pieces
       setSelected({ x, y });
       return;
     }
@@ -178,53 +245,57 @@ const Xiangqi: React.FC = () => {
     // Move piece
     if (selected) {
       if (isValidMove(currentBoard, selected.x, selected.y, x, y, turn)) {
-        const newBoard = currentBoard.map(row => row.map(p => p ? {...p} : null));
-        
-        // Check win condition (capture King)
-        const targetPiece = newBoard[y][x];
-        if (targetPiece && targetPiece.type === PieceType.GENERAL) {
-            setWinner(turn);
-        }
-
-        newBoard[y][x] = newBoard[selected.y][selected.x];
-        newBoard[selected.y][selected.x] = null;
-
-        setHistory([...history, newBoard]);
-        setTurn(turn === Player.RED ? Player.BLACK : Player.RED);
-        setSelected(null);
+        performMove(selected.x, selected.y, x, y, true);
       }
     }
   };
 
+  const performUndo = () => {
+    setHistory(prev => {
+        if (prev.length <= 1) return prev;
+        return prev.slice(0, -1);
+    });
+    setTurn(prev => prev === Player.RED ? Player.BLACK : Player.RED);
+    setSelected(null);
+    setWinner(null);
+  };
+
   const handleUndo = () => {
     if (history.length > 1) {
-      setHistory(history.slice(0, -1));
-      setTurn(turn === Player.RED ? Player.BLACK : Player.RED);
-      setSelected(null);
-      setWinner(null);
+      performUndo();
+      if (connection) connection.send({ type: 'UNDO' } as OnlineAction);
     }
   };
 
-  const resetGame = () => {
+  const performReset = () => {
     setHistory([INITIAL_BOARD]);
     setTurn(Player.RED);
     setSelected(null);
     setWinner(null);
   };
 
+  const resetGame = () => {
+    performReset();
+    if (connection) connection.send({ type: 'RESET' } as OnlineAction);
+  };
+
   return (
     <div className="flex flex-col items-center justify-center min-h-[700px] w-full max-w-4xl mx-auto p-2">
-       <div className="mb-4 flex justify-between items-center w-full max-w-md">
+       <div className="mb-4 flex flex-col md:flex-row justify-between items-center w-full max-w-md gap-4">
         <div className="flex items-center gap-4">
-            <div className={`px-4 py-2 rounded-lg font-bold shadow-sm transition-all ${turn === Player.RED ? 'bg-red-700 text-white scale-105' : 'bg-gray-200 text-gray-400'}`}>
-                红方 (Red)
+            <div className={`px-4 py-2 rounded-lg font-bold shadow-sm transition-all flex flex-col items-center ${turn === Player.RED ? 'bg-red-700 text-white scale-105' : 'bg-gray-200 text-gray-400'}`}>
+                <span>红方 (Red)</span>
+                {isOnline && isHost && <span className="text-[10px] uppercase tracking-wider bg-white/20 px-1 rounded">You</span>}
+                {isOnline && !isHost && <span className="text-[10px] uppercase tracking-wider">Opponent</span>}
             </div>
-            <div className={`px-4 py-2 rounded-lg font-bold shadow-sm transition-all ${turn === Player.BLACK ? 'bg-slate-900 text-white scale-105' : 'bg-gray-200 text-gray-400'}`}>
-                黑方 (Black)
+            <div className={`px-4 py-2 rounded-lg font-bold shadow-sm transition-all flex flex-col items-center ${turn === Player.BLACK ? 'bg-slate-900 text-white scale-105' : 'bg-gray-200 text-gray-400'}`}>
+                <span>黑方 (Black)</span>
+                {isOnline && !isHost && <span className="text-[10px] uppercase tracking-wider bg-white/20 px-1 rounded">You</span>}
+                {isOnline && isHost && <span className="text-[10px] uppercase tracking-wider">Opponent</span>}
             </div>
         </div>
         <div className="flex gap-2">
-            <button onClick={handleUndo} disabled={history.length <= 1} className="p-2 rounded-full bg-wood-300 hover:bg-wood-400 disabled:opacity-50 transition-colors" title="悔棋">
+            <button onClick={handleUndo} disabled={history.length <= 1 || (isOnline && !isMyTurn)} className="p-2 rounded-full bg-wood-300 hover:bg-wood-400 disabled:opacity-50 transition-colors" title="悔棋">
                 <Undo2 size={20} className="text-wood-900" />
             </button>
             <button onClick={resetGame} className="p-2 rounded-full bg-wood-300 hover:bg-wood-400 transition-colors" title="重来">
@@ -232,6 +303,12 @@ const Xiangqi: React.FC = () => {
             </button>
         </div>
       </div>
+
+      {isOnline && !winner && (
+          <div className="mb-2 text-wood-700 font-medium flex items-center gap-2 animate-pulse">
+              {isMyTurn ? "Your Turn" : "Waiting for opponent..."}
+          </div>
+      )}
 
       {winner && (
         <div className="absolute z-10 top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-white/90 backdrop-blur-sm border-2 border-red-600 p-8 rounded-xl shadow-2xl text-center">
@@ -245,7 +322,7 @@ const Xiangqi: React.FC = () => {
       )}
 
       {/* Board */}
-      <div className="relative bg-[#e3b988] p-1 rounded shadow-xl border-4 border-[#86432a] select-none">
+      <div className={`relative bg-[#e3b988] p-1 rounded shadow-xl border-4 border-[#86432a] select-none ${isOnline && !isMyTurn ? 'opacity-90' : ''}`}>
         <div 
           className="relative grid" 
           style={{ 

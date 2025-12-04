@@ -1,11 +1,27 @@
 import React, { useState } from 'react';
-import { GameType } from './types';
+import { GameType, PeerConnection } from './types';
 import Gomoku from './components/Gomoku';
 import Xiangqi from './components/Xiangqi';
 import GoBoard from './components/GoBoard';
+import OnlineManager from './components/OnlineManager';
 
 const App: React.FC = () => {
   const [currentGame, setCurrentGame] = useState<GameType>(GameType.GO);
+  const [connection, setConnection] = useState<PeerConnection | undefined>(undefined);
+  const [isHost, setIsHost] = useState<boolean>(false);
+
+  const handleConnect = (conn: PeerConnection, host: boolean) => {
+      setConnection(conn);
+      setIsHost(host);
+  };
+
+  const handleDisconnect = () => {
+      if (connection) {
+          connection.close();
+      }
+      setConnection(undefined);
+      setIsHost(false);
+  };
 
   return (
     <div className="min-h-screen bg-wood-50 flex flex-col font-sans">
@@ -19,7 +35,13 @@ const App: React.FC = () => {
             {Object.values(GameType).map((game) => (
               <button
                 key={game}
-                onClick={() => setCurrentGame(game)}
+                onClick={() => {
+                    if (connection && !window.confirm("Switching games will disconnect your current online session. Continue?")) {
+                        return;
+                    }
+                    if (connection) handleDisconnect();
+                    setCurrentGame(game);
+                }}
                 className={`px-4 py-2 rounded-md transition-all font-medium text-sm sm:text-base ${
                   currentGame === game
                     ? 'bg-wood-100 text-wood-900 shadow-sm'
@@ -34,11 +56,18 @@ const App: React.FC = () => {
       </header>
 
       {/* Main Content */}
-      <main className="flex-grow p-4 lg:p-8 flex items-start justify-center">
-        <div className="w-full animate-in fade-in duration-500">
-            {currentGame === GameType.GOMOKU && <Gomoku />}
-            {currentGame === GameType.XIANGQI && <Xiangqi />}
-            {currentGame === GameType.GO && <GoBoard />}
+      <main className="flex-grow p-4 lg:p-8 flex flex-col items-center justify-start">
+        <div className="w-full max-w-6xl animate-in fade-in duration-500">
+            {/* Online Manager */}
+            <OnlineManager 
+                onConnect={handleConnect} 
+                onDisconnect={handleDisconnect}
+                isConnected={!!connection}
+            />
+
+            {currentGame === GameType.GOMOKU && <Gomoku connection={connection} isHost={isHost} />}
+            {currentGame === GameType.XIANGQI && <Xiangqi connection={connection} isHost={isHost} />}
+            {currentGame === GameType.GO && <GoBoard connection={connection} isHost={isHost} />}
         </div>
       </main>
 

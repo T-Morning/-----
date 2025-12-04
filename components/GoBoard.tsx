@@ -1,12 +1,17 @@
 import React, { useState, useEffect } from 'react';
-import { GoBoardState } from '../types';
+import { GoBoardState, PeerConnection, OnlineMove, OnlineAction } from '../types';
 import { getGoTutorAdvice } from '../services/geminiService';
 import { Undo2, RefreshCw, Sparkles, BrainCircuit } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 
 const BOARD_SIZE = 19;
 
-const GoBoard: React.FC = () => {
+interface GoBoardProps {
+    connection?: PeerConnection;
+    isHost?: boolean;
+}
+
+const GoBoard: React.FC<GoBoardProps> = ({ connection, isHost }) => {
   const [history, setHistory] = useState<GoBoardState[]>([
     Array(BOARD_SIZE).fill(null).map(() => Array(BOARD_SIZE).fill(0))
   ]);
@@ -19,7 +24,26 @@ const GoBoard: React.FC = () => {
   const [isThinking, setIsThinking] = useState(false);
   const [showAdvice, setShowAdvice] = useState(false);
 
+  // Online Logic
+  const isOnline = !!connection;
+  const myPlayerNumber = isHost ? 1 : 2; // Host = Black (1), Guest = White (2)
+  const isMyTurn = !isOnline || currentPlayer === myPlayerNumber;
+
   const currentBoard = history[history.length - 1];
+
+  useEffect(() => {
+    if (!connection) return;
+
+    connection.on('data', (data: any) => {
+        if (data.type === 'MOVE') {
+            performMove(data.x, data.y, false);
+        } else if (data.type === 'UNDO') {
+            performUndo();
+        } else if (data.type === 'RESET') {
+            performReset();
+        }
+    });
+  }, [connection, history, currentPlayer]);
 
   // Logic: Check liberties and remove dead stones
   const getGroup = (board: GoBoardState, x: number, y: number, color: number) => {
@@ -60,11 +84,13 @@ const GoBoard: React.FC = () => {
     return liberties.size;
   };
 
-  const handlePlaceStone = (x: number, y: number) => {
-    if (currentBoard[y][x] !== 0) return;
+  const performMove = (x: number, y: number, isLocal: boolean) => {
+    // Access latest from closure due to re-render or useEffect dep
+    const board = history[history.length - 1];
+    if (board[y][x] !== 0) return;
 
     // Tentative move
-    const nextBoard = currentBoard.map(row => [...row]);
+    const nextBoard = board.map(row => [...row]);
     nextBoard[y][x] = currentPlayer;
 
     const opponent = currentPlayer === 1 ? 2 : 1;
@@ -94,13 +120,12 @@ const GoBoard: React.FC = () => {
     if (stonesToRemove.length === 0) {
         const myGroup = getGroup(nextBoard, x, y, currentPlayer);
         if (countLiberties(nextBoard, myGroup) === 0) {
-            // Illegal suicide move
-            alert("Suicide move is not allowed.");
+             if (isLocal) alert("Suicide move is not allowed.");
             return;
         }
     }
 
-    // Ko Rule check (Simple hash check would be better, but basic equality check for MVP)
+    // Ko Rule check
     if (history.length > 1) {
         const prevBoard = history[history.length - 2];
         let same = true;
@@ -113,13 +138,13 @@ const GoBoard: React.FC = () => {
             }
         }
         if (same) {
-            alert("Ko rule: Cannot repeat previous board state immediately.");
+            if (isLocal) alert("Ko rule: Cannot repeat previous board state immediately.");
             return;
         }
     }
 
     // Update State
-    setHistory([...history, nextBoard]);
+    setHistory(prev => [...prev, nextBoard]);
     setCurrentPlayer(opponent);
     setLastMove({x, y});
     setPrisoners(prev => ({
@@ -127,9 +152,17 @@ const GoBoard: React.FC = () => {
         [currentPlayer === 1 ? 'black' : 'white']: prev[currentPlayer === 1 ? 'black' : 'white'] + capturedStones
     }));
     
-    // Clear advice on new move
     setAiAdvice('');
     setShowAdvice(false);
+
+    if (isLocal && connection) {
+        connection.send({ type: 'MOVE', x, y } as OnlineMove);
+    }
+  };
+
+  const handlePlaceStone = (x: number, y: number) => {
+    if (!isMyTurn) return;
+    performMove(x, y, true);
   };
 
   const askAiTutor = async () => {
@@ -141,17 +174,25 @@ const GoBoard: React.FC = () => {
     setIsThinking(false);
   };
 
+  const performUndo = () => {
+      setHistory(prev => {
+          if (prev.length <= 1) return prev;
+          return prev.slice(0, -1);
+      });
+      setCurrentPlayer(prev => prev === 1 ? 2 : 1);
+      setLastMove(null);
+      setAiAdvice('');
+      setShowAdvice(false);
+  };
+
   const handleUndo = () => {
       if (history.length > 1) {
-          setHistory(history.slice(0, -1));
-          setCurrentPlayer(currentPlayer === 1 ? 2 : 1);
-          setLastMove(null); // Lose track of last move on undo, simplification
-          setAiAdvice('');
-          setShowAdvice(false);
+          performUndo();
+          if (connection) connection.send({ type: 'UNDO' } as OnlineAction);
       }
   };
 
-    const resetGame = () => {
+    const performReset = () => {
         setHistory([Array(BOARD_SIZE).fill(null).map(() => Array(BOARD_SIZE).fill(0))]);
         setCurrentPlayer(1);
         setPrisoners({black: 0, white: 0});
@@ -160,24 +201,39 @@ const GoBoard: React.FC = () => {
         setShowAdvice(false);
     };
 
+    const resetGame = () => {
+        performReset();
+        if (connection) connection.send({ type: 'RESET' } as OnlineAction);
+    };
+
   return (
     <div className="flex flex-col lg:flex-row items-start justify-center gap-8 p-4 w-full max-w-6xl mx-auto">
       
       {/* Game Area */}
       <div className="flex flex-col items-center">
-          <div className="mb-4 flex justify-between items-center w-full max-w-lg">
+          <div className="mb-4 flex flex-col md:flex-row justify-between items-center w-full max-w-lg gap-4">
              <div className="flex gap-4 text-sm font-semibold">
-                <div className={`flex items-center gap-2 ${currentPlayer===1 ? 'text-slate-900' : 'text-slate-400'}`}>
-                    <div className="w-4 h-4 rounded-full bg-slate-900 border border-white"></div>
-                    <span>黑 (Black): {prisoners.black} captured</span>
+                <div className={`flex items-center gap-2 flex-col sm:flex-row ${currentPlayer===1 ? 'text-slate-900' : 'text-slate-400'}`}>
+                    <div className="flex items-center gap-2">
+                        <div className="w-4 h-4 rounded-full bg-slate-900 border border-white"></div>
+                        <span>黑 (Black)</span>
+                    </div>
+                    <span className="text-xs">{prisoners.black} captured</span>
+                    {isOnline && isHost && <span className="text-[10px] uppercase tracking-wider bg-black/10 px-1 rounded">You</span>}
+                    {isOnline && !isHost && <span className="text-[10px] uppercase tracking-wider">Opponent</span>}
                 </div>
-                <div className={`flex items-center gap-2 ${currentPlayer===2 ? 'text-slate-900' : 'text-slate-400'}`}>
-                    <div className="w-4 h-4 rounded-full bg-white border border-slate-300"></div>
-                    <span>白 (White): {prisoners.white} captured</span>
+                <div className={`flex items-center gap-2 flex-col sm:flex-row ${currentPlayer===2 ? 'text-slate-900' : 'text-slate-400'}`}>
+                    <div className="flex items-center gap-2">
+                        <div className="w-4 h-4 rounded-full bg-white border border-slate-300"></div>
+                        <span>白 (White)</span>
+                    </div>
+                    <span className="text-xs">{prisoners.white} captured</span>
+                    {isOnline && !isHost && <span className="text-[10px] uppercase tracking-wider bg-black/10 px-1 rounded">You</span>}
+                    {isOnline && isHost && <span className="text-[10px] uppercase tracking-wider">Opponent</span>}
                 </div>
              </div>
              <div className="flex gap-2">
-                <button onClick={handleUndo} disabled={history.length <= 1} className="p-2 bg-wood-300 rounded-full hover:bg-wood-400 disabled:opacity-50">
+                <button onClick={handleUndo} disabled={history.length <= 1 || (isOnline && !isMyTurn)} className="p-2 bg-wood-300 rounded-full hover:bg-wood-400 disabled:opacity-50">
                     <Undo2 size={18} />
                 </button>
                 <button onClick={resetGame} className="p-2 bg-wood-300 rounded-full hover:bg-wood-400">
@@ -186,7 +242,13 @@ const GoBoard: React.FC = () => {
              </div>
           </div>
 
-          <div className="relative bg-[#dc9f5e] p-2 rounded shadow-xl border-2 border-[#86432a] overflow-hidden">
+          {isOnline && (
+            <div className="mb-2 text-wood-700 font-medium flex items-center gap-2 animate-pulse">
+                {isMyTurn ? "Your Turn" : "Waiting for opponent..."}
+            </div>
+          )}
+
+          <div className={`relative bg-[#dc9f5e] p-2 rounded shadow-xl border-2 border-[#86432a] overflow-hidden ${isOnline && !isMyTurn ? 'opacity-90' : ''}`}>
              {/* Board Container */}
              <div 
                 className="grid relative"
@@ -231,7 +293,7 @@ const GoBoard: React.FC = () => {
                             )}
 
                             {/* Hover Ghost */}
-                            {currentBoard[y][x] === 0 && (
+                            {currentBoard[y][x] === 0 && isMyTurn && (
                                 <div className={`absolute top-1/2 left-1/2 w-[80%] h-[80%] rounded-full transform -translate-x-1/2 -translate-y-1/2 opacity-0 hover:opacity-30 ${
                                     currentPlayer === 1 ? 'bg-black' : 'bg-white'
                                 }`}></div>
