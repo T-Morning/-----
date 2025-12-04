@@ -1,0 +1,5 @@
+{
+  "name": "Zen Board Games",
+  "description": "A collection of classic strategy board games (Go, Xiangqi, Gomoku) featuring local multiplayer and AI-powered tutoring for Go using Google Gemini.",
+  "requestFramePermissions": []
+}
